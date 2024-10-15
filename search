@@ -1,0 +1,179 @@
+#!/bin/bash
+
+# Project name: search
+# Description: A script to search files based on include and exclude patterns using ripgrep.
+#              By default, searches are case-insensitive. Use -c to make them case-sensitive.
+# Version 1.0
+# Created by Lawrence Lagerlof as a proof of concept
+# Engineered by o1-mini
+ 
+# Initialize variables
+type=""
+includes=()
+excludes=()
+case_sensitive=false
+
+# Function to display help
+show_help() {
+    cat << EOF
+Usage: search [options]
+
+Options:
+  -t TYPE         File type to search (e.g., php, python)
+  -i INCLUDE      Include string (can be used multiple times)
+  -e EXCLUDE      Exclude string (can be used multiple times)
+  -c              Enable case-sensitive search (default is case-insensitive)
+  --help          Display this help message
+
+Examples:
+  search -t php -i tmpl_open -e load_php_templates
+  search -t php -i tmpl_open -i load_php_templates
+  search -t php -i tmpl_open
+  search -t python -e "my text"
+  search -c -t java -i Main -e "deprecatedMethod"
+EOF
+}
+
+# Parse command-line arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -t)
+            shift
+            if [[ $# -eq 0 ]]; then
+                echo "Error: -t requires an argument."
+                show_help
+                exit 1
+            fi
+            type="$1"
+            shift
+            ;;
+        -i)
+            shift
+            if [[ $# -eq 0 ]]; then
+                echo "Error: -i requires an argument."
+                show_help
+                exit 1
+            fi
+            includes+=("$1")
+            shift
+            ;;
+        -e)
+            shift
+            if [[ $# -eq 0 ]]; then
+                echo "Error: -e requires an argument."
+                show_help
+                exit 1
+            fi
+            excludes+=("$1")
+            shift
+            ;;
+        -c)
+            case_sensitive=true
+            shift
+            ;;
+        --help)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo "Error: Unknown option: $1"
+            show_help
+            exit 1
+            ;;
+    esac
+done
+
+# If no arguments are provided, display help
+if [[ ${#includes[@]} -eq 0 && ${#excludes[@]} -eq 0 && -z "$type" && "$case_sensitive" == false ]]; then
+    show_help
+    exit 0
+fi
+
+# Ensure at least one of -t, -i, or -e is set
+if [[ -z "$type" && ${#includes[@]} -eq 0 && ${#excludes[@]} -eq 0 && "$case_sensitive" == false ]]; then
+    echo "Error: At least one of -t, -i, or -e must be specified."
+    show_help
+    exit 1
+fi
+
+# Set the case flag for ripgrep
+if [[ "$case_sensitive" == false ]]; then
+    rg_case_flag="--ignore-case"
+else
+    rg_case_flag=""
+fi
+
+# Build the initial rg command
+if [[ ${#includes[@]} -gt 0 ]]; then
+    # Start with the first include pattern
+    initial_include="${includes[0]}"
+    rg_command=(rg -l "$initial_include" $rg_case_flag)
+    if [[ -n "$type" ]]; then
+        rg_command+=(--type "$type")
+    fi
+else
+    # If no include patterns, list all files of the specified type
+    rg_command=(rg --files)
+    if [[ -n "$type" ]]; then
+        rg_command+=(--type "$type")
+    fi
+    if [[ "$case_sensitive" == false ]]; then
+        rg_command+=(--ignore-case)
+    fi
+fi
+
+# Prepare the conditions for additional includes and excludes
+conditions=()
+
+# Add remaining include patterns
+if [[ ${#includes[@]} -gt 1 ]]; then
+    for ((i=1; i<${#includes[@]}; i++)); do
+        # Escape single quotes in the pattern
+        escaped_include=$(printf '%s' "${includes[i]}" | sed "s/'/'\\\\''/g")
+        conditions+=( "rg -q '$escaped_include' \"\$1\" $rg_case_flag && " )
+    done
+fi
+
+# Add exclude patterns
+if [[ ${#excludes[@]} -gt 0 ]]; then
+    for exc in "${excludes[@]}"; do
+        # Escape single quotes in the pattern
+        escaped_exclude=$(printf '%s' "$exc" | sed "s/'/'\\\\''/g")
+        conditions+=( "! rg -q '$escaped_exclude' \"\$1\" $rg_case_flag && " )
+    done
+fi
+
+# Finalize the condition string
+if [[ ${#conditions[@]} -gt 0 ]]; then
+    # Remove the trailing ' && '
+    last_condition="${conditions[-1]}"
+    conditions[-1]=$(echo "$last_condition" | sed 's/ && $//')
+    # Combine all conditions and append echo
+    condition_str=$(printf "%s " "${conditions[@]}")
+    condition_str+="&& echo \"\$1\" || true"
+fi
+
+# Execute the search command
+if [[ -n "$condition_str" ]]; then
+    # Execute the initial rg command and pipe to xargs with the constructed conditions
+    output=$( "${rg_command[@]}" | xargs -I {} sh -c "$condition_str" _ "{}" 2>/dev/null )
+else
+    # If no additional conditions, simply execute the initial rg command
+    output=$( "${rg_command[@]}" )
+fi
+
+# Handle errors during execution
+if [[ $? -ne 0 ]]; then
+    echo "Error: Failed to execute the search."
+    exit 1
+fi
+
+# Notify the user if no files are found
+if [[ -z "$output" ]]; then
+    echo "No files found matching the criteria."
+    exit 0
+fi
+
+# Display the search results
+echo "$output"
+
